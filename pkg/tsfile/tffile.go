@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -352,6 +353,9 @@ func ScanRange(root, series string, from, to time.Time, fn func(Point) bool) err
 		}
 		// e.Name() は tagHash ディレクトリ
 		if err := scanTagDir(filepath.Join(seriesDir, e.Name()), from, to, fn); err != nil {
+			if errors.Is(err, errEarlyStop) {
+				return nil
+			}
 			return err
 		}
 	}
@@ -367,6 +371,9 @@ func scanTagDir(tagDir string, from, to time.Time, fn func(Point) bool) error {
 			continue
 		}
 		if err := scanFile(path, from, to, fn); err != nil {
+			if errors.Is(err, errEarlyStop) {
+				return errEarlyStop
+			}
 			return err
 		}
 	}
@@ -399,7 +406,84 @@ func scanFile(path string, from, to time.Time, fn func(Point) bool) error {
 			continue
 		}
 		if !fn(p) {
-			return nil
+			return errEarlyStop
 		}
 	}
+}
+
+var errEarlyStop = errors.New("tsfile: early stop")
+
+// ---- 保管期間ユーティリティ ----
+
+// DeleteBeforeDay は、指定 loc の日境界で boundaryDay の「その日より前」の日ディレクトリ
+// (YYYY/MM/DD) を series 配下の全 tagHash について再帰削除する。
+// 例: boundaryDay=JSTで 2025-08-26 の場合、2025/08/25 以前のディレクトリを削除。
+func DeleteBeforeDay(root, series string, boundaryDay time.Time, loc *time.Location) error {
+	if loc == nil {
+		loc = time.UTC
+	}
+	by, bm, bd := boundaryDay.In(loc).Date()
+	cutYMD := by*10000 + int(bm)*100 + bd
+
+	seriesDir := filepath.Join(root, series)
+	tagDirs, err := os.ReadDir(seriesDir)
+	if err != nil {
+		return err
+	}
+	for _, td := range tagDirs {
+		if !td.IsDir() {
+			continue
+		}
+		tagDir := filepath.Join(seriesDir, td.Name())
+		// 年ディレクトリ
+		years, err := os.ReadDir(tagDir)
+		if err != nil {
+			return err
+		}
+		for _, yentry := range years {
+			if !yentry.IsDir() {
+				continue
+			}
+			y, err := strconv.Atoi(yentry.Name())
+			if err != nil || y <= 0 {
+				continue
+			}
+			ydir := filepath.Join(tagDir, yentry.Name())
+			months, err := os.ReadDir(ydir)
+			if err != nil {
+				return err
+			}
+			for _, mentry := range months {
+				if !mentry.IsDir() {
+					continue
+				}
+				m, err := strconv.Atoi(mentry.Name())
+				if err != nil || m < 1 || m > 12 {
+					continue
+				}
+				mdir := filepath.Join(ydir, mentry.Name())
+				days, err := os.ReadDir(mdir)
+				if err != nil {
+					return err
+				}
+				for _, dentry := range days {
+					if !dentry.IsDir() {
+						continue
+					}
+					d, err := strconv.Atoi(dentry.Name())
+					if err != nil || d < 1 || d > 31 {
+						continue
+					}
+					ymd := y*10000 + m*100 + d
+					if ymd < cutYMD {
+						// 対象日ディレクトリを削除
+						if err := os.RemoveAll(filepath.Join(mdir, dentry.Name())); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

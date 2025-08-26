@@ -388,3 +388,122 @@ func sizeOrZero(fi os.FileInfo) int64 {
 	}
 	return fi.Size()
 }
+
+func TestDeleteBeforeDayUTC(t *testing.T) {
+	dir := t.TempDir()
+	series := "metrics"
+	tags := Tags{"host": "game01", "region": "tokyo"}
+	tagHash := tags.Hash()
+
+	r := NewRouter(dir, series, WithLocation(time.UTC))
+	// 3日分のデータを1点ずつ投入
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}
+	must(r.Append(Point{T: time.Date(2025, 8, 24, 12, 0, 0, 0, time.UTC), V: 1, Tags: tags}))
+	must(r.Append(Point{T: time.Date(2025, 8, 25, 12, 0, 0, 0, time.UTC), V: 2, Tags: tags}))
+	must(r.Append(Point{T: time.Date(2025, 8, 26, 12, 0, 0, 0, time.UTC), V: 3, Tags: tags}))
+	_ = r.Close()
+
+	// 事前に3日ディレクトリが存在すること
+	base := filepath.Join(dir, series, tagHash, "2025", "08")
+	for _, d := range []string{"24", "25", "26"} {
+		if _, err := os.Stat(filepath.Join(base, d)); err != nil {
+			t.Fatalf("expected day dir exists before delete: %s (%v)", filepath.Join(base, d), err)
+		}
+	}
+
+	// 2025-08-26 を境界（UTC）として、それより前(=24,25)を削除
+	if err := DeleteBeforeDay(dir, series, time.Date(2025, 8, 26, 0, 0, 0, 0, time.UTC), time.UTC); err != nil {
+		t.Fatalf("DeleteBeforeDay: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(base, "24")); !os.IsNotExist(err) {
+		t.Fatalf("expected 24 deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "25")); !os.IsNotExist(err) {
+		t.Fatalf("expected 25 deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "26")); err != nil {
+		t.Fatalf("expected 26 kept, stat err=%v", err)
+	}
+}
+
+func TestDeleteBeforeDayJST(t *testing.T) {
+	dir := t.TempDir()
+	series := "metrics"
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		// フォールバック（テストが動作するよう固定オフセットを使用）
+		jst = time.FixedZone("JST", 9*3600)
+	}
+	tags := Tags{"host": "game01", "region": "tokyo"}
+	tagHash := tags.Hash()
+
+	r := NewRouter(dir, series, WithLocation(jst))
+	// JST の日付で 24, 25, 26 日の正午に 1 点ずつ
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}
+	must(r.Append(Point{T: time.Date(2025, 8, 24, 12, 0, 0, 0, jst), V: 1, Tags: tags}))
+	must(r.Append(Point{T: time.Date(2025, 8, 25, 12, 0, 0, 0, jst), V: 2, Tags: tags}))
+	must(r.Append(Point{T: time.Date(2025, 8, 26, 12, 0, 0, 0, jst), V: 3, Tags: tags}))
+	_ = r.Close()
+
+	base := filepath.Join(dir, series, tagHash, "2025", "08")
+	// 事前確認
+	for _, d := range []string{"24", "25", "26"} {
+		if _, err := os.Stat(filepath.Join(base, d)); err != nil {
+			t.Fatalf("expected day dir exists before delete: %s (%v)", filepath.Join(base, d), err)
+		}
+	}
+
+	// JST で 2025-08-26 を境界として、その前日以前(=24,25)を削除
+	if err := DeleteBeforeDay(dir, series, time.Date(2025, 8, 26, 0, 0, 0, 0, jst), jst); err != nil {
+		t.Fatalf("DeleteBeforeDay: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(base, "24")); !os.IsNotExist(err) {
+		t.Fatalf("expected 24 deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "25")); !os.IsNotExist(err) {
+		t.Fatalf("expected 25 deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "26")); err != nil {
+		t.Fatalf("expected 26 kept, stat err=%v", err)
+	}
+}
+
+func TestScanRangeEarlyStop(t *testing.T) {
+	dir := t.TempDir()
+	series := "metrics"
+	r := NewRouter(dir, series, WithLocation(time.UTC), WithFlushEvery(1))
+	defer r.Close()
+
+	base := time.Date(2025, 8, 26, 10, 0, 0, 0, time.UTC)
+	tokyo := Tags{"region": "tokyo", "host": "game01"}
+	osaka := Tags{"region": "osaka", "host": "game02"}
+	for i := 0; i < 3; i++ {
+		_ = r.Append(Point{T: base.Add(time.Minute * time.Duration(i)), V: float64(i), Tags: tokyo})
+		_ = r.Append(Point{T: base.Add(time.Minute * time.Duration(i)), V: float64(i + 100), Tags: osaka})
+	}
+	_ = r.Close()
+
+	from := base
+	to := base.Add(10 * time.Minute)
+	count := 0
+	err := ScanRange(dir, series, from, to, func(p Point) bool {
+		count++
+		return false // 1件見たら即停止
+	})
+	if err != nil {
+		t.Fatalf("ScanRange: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected early stop after 1 point, got %d", count)
+	}
+}
