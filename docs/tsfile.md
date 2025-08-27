@@ -1,5 +1,6 @@
 # tsfile（タグ付き時系列ファイル）仕様書 v0.1
 
+**モジュール名:** `github.com/masahide/7dtd-stats/pkg/tsfile`
 **ステータス**: Draft / Experimental
 **最終更新**: 2025-08-26 (JST)
 **対象言語/環境**: Go 1.22+（標準ライブラリのみ）
