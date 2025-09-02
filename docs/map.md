@@ -150,14 +150,14 @@ SvelteKit のページから使うなら：
 
 このリポジトリには、`/map/...` を同じパスのまま上流（ゲームサーバー）へ転送する軽量プロキシを同梱しています。
 
-- 実行ファイル: `cmd/map-proxy`
+- 実行ファイル: `cmd/server`
 - ライブラリ: `pkg/mapproxy`
 
 起動例:
 
 ```bash
-go build -o map-proxy ./cmd/map-proxy
-./map-proxy -listen :8081 -upstream http://xxx.xxx.xxx.xxx:8080
+go build -o server ./cmd/server
+./server -listen :8081 -upstream http://xxx.xxx.xxx.xxx:8080
 # 以降、http://localhost:8081/map/0/0/0.png?t=... にアクセスすると
 # http://xxx.xxx.xxx.xxx:8080/map/0/0/0.png?t=... に転送されます
 ```

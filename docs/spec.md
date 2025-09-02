@@ -31,7 +31,7 @@ flowchart LR
     B1["Poller（定期取得/差分）"]
     B2["Storage（pkg/storage: TSStore）"]
     B3["SSE Hub（replay/ping）"]
-    B4["Tile Proxy/Cache（/tiles）"]
+    B4["Tile Proxy/Cache（/map）"]
     B5["REST API（履歴/状態/ヘルス）"]
     B6["Retention Job（日次削除）"]
   end
@@ -39,7 +39,7 @@ flowchart LR
   FE["ブラウザ（Leaflet + Svelte）"]
 
   FE <-- "Static (/)" --> B0
-  FE <-- "Tiles (/tiles)" --> B4
+  FE <-- "Tiles (/map)" --> B4
   FE <-- "SSE (/sse/live)" --> B3
   FE <-- "REST (/api/...)" --> B5
 
@@ -102,7 +102,7 @@ flowchart LR
 
 ### 4.4 Tile Proxy/Cache
 
-- `GET /tiles/{z}/{x}/{y}.png` → ゲーム側 `.../map/...` へプロキシし**ディスクキャッシュ**（ETag/TTL）。
+- `GET /map/{z}/{x}/{y}.png` → ゲーム側 `.../map/...` へプロキシし**ディスクキャッシュ**（ETag/TTL）。
 
 ### 4.5 REST API
 
@@ -118,7 +118,7 @@ flowchart LR
 
 - `GET /` / `/assets/*`：SvelteKit (SSG) 成果物
 - `GET /sse/live?topics=pos,events&players=all|id1,...`：SSE
-- `GET /tiles/{z}/{x}/{y}.png`：タイル
+- `GET /map/{z}/{x}/{y}.png`：タイル
 - `GET /api/map/info`：地図メタ
 - `GET /api/history/tracks`：軌跡復元
 - `GET /api/history/events`：イベント列挙
@@ -171,7 +171,7 @@ flowchart LR
 
 ## 7. フロント（Leaflet）連携要点
 
-- `L.tileLayer('/tiles/{z}/{x}/{y}.png', { tms:true, tileSize:128, maxNativeZoom:4 })`
+- `L.tileLayer('/map/{z}/{x}/{y}.png', { tms:true, tileSize:128, maxNativeZoom:4 })`
 - SSE `player_pos` で `[z, x]` を `LatLng` に追加して `L.polyline` 更新
 - 初期表示用に `/api/history/tracks` を呼んで直近 N 分の折れ線を描画 →SSE で継続
 
@@ -238,7 +238,7 @@ auth:
 
 ## 12. ロールアウト手順（簡略）
 
-1. タイルプロキシ・静的配信のみで起動（`/tiles`, `/` の確認）
+1. タイルプロキシ・静的配信のみで起動（`/map`, `/` の確認）
 2. Poller を ON（SSE にダミー配信 → Leaflet 折れ線表示確認）
 3. `pkg/storage` 書込 ON（`./data` にファイル生成）
 4. `/api/history/*` の参照と Retention Job（cron/systemd timer）を導入
