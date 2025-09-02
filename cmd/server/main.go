@@ -1,39 +1,63 @@
 package main
 
 import (
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
-	"time"
+    "context"
+    "flag"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "os/signal"
+    "path/filepath"
+    "syscall"
+    "time"
 
-	"github.com/masahide/7dtd-stats/pkg/mapproxy"
-	"github.com/masahide/7dtd-stats/pkg/sse"
+    "github.com/masahide/7dtd-stats/pkg/mapproxy"
+    "github.com/masahide/7dtd-stats/pkg/sse"
+    "github.com/masahide/7dtd-stats/pkg/poller"
+    envconfig "github.com/kelseyhightower/envconfig"
 )
 
 // Config はサービス起動に必要な設定です。
 type Config struct {
-	Listen          string        // 例: ":8081"
-	UpstreamBaseURL string        // 例: "http://game:8080"
-	StaticDir       string        // 例: "./web"（空なら無効）
-	ShutdownTimeout time.Duration // 例: 5s
+    Listen          string        // 例: ":8081"
+    UpstreamBaseURL string        // 例: "http://game:8080"
+    StaticDir       string        // 例: "./web"（空なら無効）
+    ShutdownTimeout time.Duration // 例: 5s（実値。env は秒で指定）
+    PollPlayersURL  string        // 例: "http://game:8080/api/players"
+    PollInterval    time.Duration // 例: 2s
+    ShutdownTimeoutSec int `envconfig:"SHUTDOWN_TIMEOUT_SEC" default:"5"`
 }
 
 func loadConfig() Config {
-	var cfg Config
-	flag.StringVar(&cfg.Listen, "listen", getEnv("LISTEN_ADDR", ":8081"), "listen address (e.g. :8081)")
-	flag.StringVar(&cfg.UpstreamBaseURL, "upstream", getEnv("UPSTREAM_BASE_URL", ""), "upstream base URL (e.g. http://host:8080)")
-	flag.StringVar(&cfg.StaticDir, "static-dir", getEnv("STATIC_DIR", ""), "path to static contents (optional)")
-	var shutdownSec int
-	flag.IntVar(&shutdownSec, "shutdown-timeout", getEnvInt("SHUTDOWN_TIMEOUT_SEC", 5), "graceful shutdown timeout seconds")
-	flag.Parse()
-	cfg.ShutdownTimeout = time.Duration(shutdownSec) * time.Second
-	return cfg
+    // 1) 環境変数から読み込み
+    var cfg Config
+    _ = envconfig.Process("", &struct {
+        *Config
+        Listen             string        `envconfig:"LISTEN_ADDR"`
+        UpstreamBaseURL    string        `envconfig:"UPSTREAM_BASE_URL"`
+        StaticDir          string        `envconfig:"STATIC_DIR"`
+        PollPlayersURL     string        `envconfig:"POLL_PLAYERS_URL"`
+        PollInterval       time.Duration `envconfig:"POLL_INTERVAL" default:"2s"`
+        ShutdownTimeoutSec int           `envconfig:"SHUTDOWN_TIMEOUT_SEC" default:"5"`
+    }{Config: &cfg})
+
+    // 2) フラグ（envをデフォルトに）
+    flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address (e.g. :8081)")
+    flag.StringVar(&cfg.UpstreamBaseURL, "upstream", cfg.UpstreamBaseURL, "upstream base URL (e.g. http://host:8080)")
+    flag.StringVar(&cfg.StaticDir, "static-dir", cfg.StaticDir, "path to static contents (optional)")
+    flag.StringVar(&cfg.PollPlayersURL, "poll-players-url", cfg.PollPlayersURL, "players JSON endpoint (optional)")
+    pollInt := cfg.PollInterval.String()
+    flag.StringVar(&pollInt, "poll-interval", pollInt, "poll interval for players (e.g. 2s)")
+    shutdownSec := cfg.ShutdownTimeoutSec
+    flag.IntVar(&shutdownSec, "shutdown-timeout", shutdownSec, "graceful shutdown timeout seconds")
+    flag.Parse()
+
+    // 3) 派生値の確定
+    cfg.ShutdownTimeout = time.Duration(shutdownSec) * time.Second
+    if d, err := time.ParseDuration(pollInt); err == nil { cfg.PollInterval = d } else if cfg.PollInterval == 0 { cfg.PollInterval = 2 * time.Second }
+    cfg.ShutdownTimeoutSec = shutdownSec
+    return cfg
 }
 
 func main() {
@@ -49,11 +73,11 @@ func main() {
 		sse.WithPingInterval(15*time.Second),
 		sse.WithClientBuffer(64),
 	)
-	go hub.Run()
-	defer hub.Close()
+    go hub.Run()
+    defer hub.Close()
 
-	// "Tile Proxy/Cache" 相当（/map/* のみ許可）。他機能は未実装だが、土台のルータ構成を先に用意。
-	mapHandler, err := mapproxy.Handler(cfg.UpstreamBaseURL,
+    // "Tile Proxy/Cache" 相当（/map/* のみ許可）。他機能は未実装だが、土台のルータ構成を先に用意。
+    mapHandler, err := mapproxy.Handler(cfg.UpstreamBaseURL,
 		mapproxy.WithRequestTimeout(15*time.Second),
 		mapproxy.WithAllowedPrefixes("/map/"),
 	)
@@ -71,11 +95,11 @@ func main() {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	// SSE: /sse/live
-	mux.Handle("/sse/live", http.HandlerFunc(hub.ServeHTTP))
-	// Future endpoints (未実装の土台): REST
-	mux.HandleFunc("/api/map/info", notImplemented)
-	mux.HandleFunc("/api/history/tracks", notImplemented)
-	mux.HandleFunc("/api/history/events", notImplemented)
+    mux.Handle("/sse/live", http.HandlerFunc(hub.ServeHTTP))
+    // Future endpoints (未実装の土台): REST
+    mux.HandleFunc("/api/map/info", notImplemented)
+    mux.HandleFunc("/api/history/tracks", notImplemented)
+    mux.HandleFunc("/api/history/events", notImplemented)
 
 	// Root/Static (オプショナル)。指定時のみ有効化。
 	if d := cfg.StaticDir; d != "" {
@@ -103,17 +127,34 @@ func main() {
 		})
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+    srv := &http.Server{
+        Addr:              cfg.Listen,
+        Handler:           mux,
+        ReadHeaderTimeout: 5 * time.Second,
+        ReadTimeout:       10 * time.Second,
+        WriteTimeout:      30 * time.Second,
+        IdleTimeout:       60 * time.Second,
+    }
 
-	// 起動ログ
-	log.Printf("starting server on %s -> %s (paths: /map/)", cfg.Listen, cfg.UpstreamBaseURL)
+    // 起動ログ
+    log.Printf("starting server on %s -> %s (paths: /map/)", cfg.Listen, cfg.UpstreamBaseURL)
+
+    // Poller 起動（任意）: プレイヤー位置をポーリングして SSE に配信
+    var pollCancel context.CancelFunc
+    if cfg.PollPlayersURL != "" {
+        ctxPoll, cancel := context.WithCancel(context.Background())
+        pollCancel = cancel
+        prov := &poller.JSONProvider{URL: cfg.PollPlayersURL, Timeout: 5 * time.Second}
+        pl := &poller.Poller{Prov: prov, Hub: hub, Interval: cfg.PollInterval}
+        go func() {
+            if err := pl.Run(ctxPoll); err != nil && err != context.Canceled {
+                log.Printf("poller error: %v", err)
+            }
+        }()
+        log.Printf("poller started: %s (interval=%s)", cfg.PollPlayersURL, cfg.PollInterval)
+    } else {
+        log.Printf("poller disabled: set -poll-players-url or POLL_PLAYERS_URL to enable")
+    }
 
 	// Graceful shutdown
 	go func() {
@@ -122,34 +163,18 @@ func main() {
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+    <-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
-		_ = srv.Close()
-	}
-	log.Printf("shutdown complete")
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		var i int
-		if _, err := fmt.Sscanf(v, "%d", &i); err == nil {
-			return i
-		}
-	}
-	return def
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+    defer cancel()
+    if pollCancel != nil { pollCancel() }
+    if err := srv.Shutdown(ctx); err != nil {
+        log.Printf("graceful shutdown failed: %v", err)
+        _ = srv.Close()
+    }
+    log.Printf("shutdown complete")
 }
 
 func notImplemented(w http.ResponseWriter, _ *http.Request) {
