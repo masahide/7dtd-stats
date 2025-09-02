@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/masahide/7dtd-stats/pkg/mapproxy"
+	"github.com/masahide/7dtd-stats/pkg/sse"
 )
 
 // Config はサービス起動に必要な設定です。
@@ -42,6 +43,15 @@ func main() {
 		os.Exit(2)
 	}
 
+	// SSE Hub（replay/ping 対応）。現時点では外部入力が無いので ping のみ送出。
+	hub := sse.NewHub(
+		sse.WithReplay(256),
+		sse.WithPingInterval(15*time.Second),
+		sse.WithClientBuffer(64),
+	)
+	go hub.Run()
+	defer hub.Close()
+
 	// "Tile Proxy/Cache" 相当（/map/* のみ許可）。他機能は未実装だが、土台のルータ構成を先に用意。
 	mapHandler, err := mapproxy.Handler(cfg.UpstreamBaseURL,
 		mapproxy.WithRequestTimeout(15*time.Second),
@@ -56,15 +66,16 @@ func main() {
 	// Map tiles (/map/{z}/{x}/{y}.png)
 	mux.Handle("/map/", mapHandler)
 
-    // Health/Ready endpoints
-    mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-    mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	// Health/Ready endpoints
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
-    // Future endpoints (未実装の土台): SSE / REST
-    mux.HandleFunc("/sse/live", notImplemented)
-    mux.HandleFunc("/api/map/info", notImplemented)
-    mux.HandleFunc("/api/history/tracks", notImplemented)
-    mux.HandleFunc("/api/history/events", notImplemented)
+	// SSE: /sse/live
+	mux.Handle("/sse/live", http.HandlerFunc(hub.ServeHTTP))
+	// Future endpoints (未実装の土台): REST
+	mux.HandleFunc("/api/map/info", notImplemented)
+	mux.HandleFunc("/api/history/tracks", notImplemented)
+	mux.HandleFunc("/api/history/events", notImplemented)
 
 	// Root/Static (オプショナル)。指定時のみ有効化。
 	if d := cfg.StaticDir; d != "" {
@@ -84,13 +95,13 @@ func main() {
 				return
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-            fmt.Fprintf(w, "7dtd-stats server\n\n")
-            fmt.Fprintf(w, "- /map/{z}/{x}/{y}.png  -> proxied to upstream\n")
-            fmt.Fprintf(w, "- /healthz, /readyz\n")
-            fmt.Fprintf(w, "- /sse/live (501), /api/map/info (501)\n")
-            fmt.Fprintf(w, "- /api/history/tracks (501), /api/history/events (501)\n")
-        })
-    }
+			fmt.Fprintf(w, "7dtd-stats server\n\n")
+			fmt.Fprintf(w, "- /map/{z}/{x}/{y}.png  -> proxied to upstream\n")
+			fmt.Fprintf(w, "- /healthz, /readyz\n")
+			fmt.Fprintf(w, "- /sse/live (501), /api/map/info (501)\n")
+			fmt.Fprintf(w, "- /api/history/tracks (501), /api/history/events (501)\n")
+		})
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -102,7 +113,7 @@ func main() {
 	}
 
 	// 起動ログ
-    log.Printf("starting server on %s -> %s (paths: /map/)", cfg.Listen, cfg.UpstreamBaseURL)
+	log.Printf("starting server on %s -> %s (paths: /map/)", cfg.Listen, cfg.UpstreamBaseURL)
 
 	// Graceful shutdown
 	go func() {
@@ -121,7 +132,7 @@ func main() {
 		log.Printf("graceful shutdown failed: %v", err)
 		_ = srv.Close()
 	}
-    log.Printf("shutdown complete")
+	log.Printf("shutdown complete")
 }
 
 func getEnv(key, def string) string {
@@ -138,9 +149,9 @@ func getEnvInt(key string, def int) int {
 			return i
 		}
 	}
-    return def
+	return def
 }
 
 func notImplemented(w http.ResponseWriter, _ *http.Request) {
-    http.Error(w, http.StatusText(http.StatusNotImplemented), http.StatusNotImplemented)
+	http.Error(w, http.StatusText(http.StatusNotImplemented), http.StatusNotImplemented)
 }
